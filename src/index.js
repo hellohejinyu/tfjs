@@ -1,8 +1,8 @@
-const tf = require('@tensorflow/tfjs-node')
-const fs = require('fs')
-const path = require('path')
 const CliProgress = require('cli-progress')
 const createCsvWriter = require('csv-writer').createObjectCsvWriter
+const fs = require('fs')
+const path = require('path')
+const tf = require('@tensorflow/tfjs-node')
 
 const Bar = new CliProgress.SingleBar({}, CliProgress.Presets.shades_classic)
 
@@ -20,11 +20,21 @@ const preprocessImage = (data) => {
   const tensor = tf.node.decodeJpeg(data)
     .resizeNearestNeighbor([224, 224])
     .toFloat()
-
   const offset = tf.scalar(127.5)
   return tensor.sub(offset)
     .div(offset)
     .expandDims()
+}
+
+const readFileList = () => {
+  const imagePath = path.resolve(__dirname, './images')
+  const res = fs.readdirSync(imagePath)
+  return res.filter(i => i.includes('.jpg') || i.includes('.jpeg')).map((f) => {
+    return {
+      name: f,
+      path: path.join(imagePath, f)
+    }
+  })
 }
 
 const run = async () => {
@@ -65,21 +75,13 @@ const run = async () => {
       Bar.update(index + 1)
     })
     Bar.stop()
-    csvWriter.writeRecords(records).then(() => {
+    try {
+      await csvWriter.writeRecords(records)
       console.log(`${recordFileName} 文件写入成功！`)
-    })
-  }
-}
-
-const readFileList = () => {
-  const imagePath = path.resolve(__dirname, './images')
-  const res = fs.readdirSync(imagePath)
-  return res.filter(i => i.includes('.jpg') || i.includes('.jpeg')).map((f) => {
-    return {
-      name: f,
-      path: path.join(imagePath, f)
+    } catch (error) {
+      console.log('csv 文件写入失败')
     }
-  })
+  }
 }
 
 run()
