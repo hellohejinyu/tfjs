@@ -16,15 +16,17 @@ const loadModel = async () => {
   }
 }
 
-const preprocessImage = (data) => {
+const offset = tf.scalar(127.5)
+
+const preprocessImage = (filePath) => tf.tidy(() => {
+  const data = fs.readFileSync(filePath)
   const tensor = tf.node.decodeJpeg(data)
     .resizeNearestNeighbor([224, 224])
     .toFloat()
-  const offset = tf.scalar(127.5)
   return tensor.sub(offset)
     .div(offset)
     .expandDims()
-}
+})
 
 const readFileList = () => {
   const imagePath = path.resolve(__dirname, './images')
@@ -57,30 +59,35 @@ const run = async () => {
     })
     Bar.start(fileList.length, 0)
     const records = []
-    fileList.forEach((file, index) => {
-      const tensor = preprocessImage(
-        fs.readFileSync(file.path)
-      )
-      const prediction = model.predict(tensor).dataSync()
+    const preprocessFile = (index = 0) => {
+      const tensor = preprocessImage(fileList[index].path)
+      const prediction = model.predict(tensor)
+      const data = prediction.dataSync()
+      tensor.dispose()
+      prediction.dispose()
       records.push({
-        name: file.name,
-        mel: prediction[0],
-        nv: prediction[1],
-        bcc: prediction[2],
-        akiec: prediction[3],
-        bkl: prediction[4],
-        df: prediction[5],
-        vasc: prediction[6]
+        name: fileList[index].name,
+        mel: data[0],
+        nv: data[1],
+        bcc: data[2],
+        akiec: data[3],
+        bkl: data[4],
+        df: data[5],
+        vasc: data[6]
       })
       Bar.update(index + 1)
-    })
-    Bar.stop()
-    try {
-      await csvWriter.writeRecords(records)
-      console.log(`${recordFileName} 文件写入成功！`)
-    } catch (error) {
-      console.log('csv 文件写入失败')
+      if (index < fileList.length - 1) {
+        preprocessFile(index + 1)
+      } else {
+        Bar.stop()
+        csvWriter.writeRecords(records).then(() => {
+          console.log(`${recordFileName} 文件写入成功！`)
+        }).catch(() => {
+          console.log('csv 文件写入失败')
+        })
+      }
     }
+    preprocessFile()
   }
 }
 
