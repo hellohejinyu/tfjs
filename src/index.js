@@ -1,32 +1,16 @@
 const CliProgress = require('cli-progress')
+const cp = require('child_process')
 const createCsvWriter = require('csv-writer').createObjectCsvWriter
 const fs = require('fs')
 const path = require('path')
-const tf = require('@tensorflow/tfjs-node')
+
+process.env.TF_CPP_MIN_LOG_LEVEL = '2'
+
+/** 多进程并行处理，可以更充分地利用多核 CPU 运算能力 */
+const MAX_THREAD = 2
 
 const Bar = new CliProgress.SingleBar({}, CliProgress.Presets.shades_classic)
-
-const loadModel = async () => {
-  const modelPath = 'file://' + path.join(__dirname, './mobilenet/model.json')
-  try {
-    const model = await tf.loadLayersModel(modelPath)
-    return model
-  } catch (error) {
-    console.log(error)
-  }
-}
-
-const offset = tf.scalar(127.5)
-
-const preprocessImage = (filePath) => tf.tidy(() => {
-  const data = fs.readFileSync(filePath)
-  const tensor = tf.node.decodeJpeg(data)
-    .resizeNearestNeighbor([224, 224])
-    .toFloat()
-  return tensor.sub(offset)
-    .div(offset)
-    .expandDims()
-})
+let allRecords, progress
 
 const readFileList = () => {
   const imagePath = path.resolve(__dirname, './images')
@@ -39,56 +23,68 @@ const readFileList = () => {
   })
 }
 
+const triggerMsg = (i, { index, records }, finishCallback) => {
+  progress[i] = index
+  Bar.update(progress.reduce((prev, cur) => prev + cur), 0)
+  if (records) {
+    allRecords[i] = records
+    if (allRecords.every(i => !!i)) {
+      finishCallback()
+    }
+  }
+}
+
 const run = async () => {
-  const model = await loadModel()
-  if (model) {
-    const fileList = readFileList()
-    const recordFileName = `rec_${Date.now()}.csv`
-    const csvWriter = createCsvWriter({
-      path: path.resolve(__dirname, `./records/${recordFileName}`),
-      header: [
-        { id: 'name', title: 'IMAGE' },
-        { id: 'mel', title: 'MEL' },
-        { id: 'nv', title: 'NV' },
-        { id: 'bcc', title: 'BCC' },
-        { id: 'akiec', title: 'AKIEC' },
-        { id: 'bkl', title: 'BKL' },
-        { id: 'df', title: 'DF' },
-        { id: 'vasc', title: 'VASC' }
-      ]
-    })
-    Bar.start(fileList.length, 0)
-    const records = []
-    const preprocessFile = (index = 0) => {
-      const tensor = preprocessImage(fileList[index].path)
-      const prediction = model.predict(tensor)
-      const data = prediction.dataSync()
-      tensor.dispose()
-      prediction.dispose()
-      records.push({
-        name: fileList[index].name,
-        mel: data[0],
-        nv: data[1],
-        bcc: data[2],
-        akiec: data[3],
-        bkl: data[4],
-        df: data[5],
-        vasc: data[6]
-      })
-      Bar.update(index + 1)
-      if (index < fileList.length - 1) {
-        preprocessFile(index + 1)
-      } else {
+  allRecords = new Array(MAX_THREAD).fill(null)
+  progress = new Array(MAX_THREAD).fill(0)
+  const recordFileName = `rec_${Date.now()}.csv`
+  const csvWriter = createCsvWriter({
+    path: path.resolve(__dirname, `./records/${recordFileName}`),
+    header: [
+      { id: 'name', title: 'IMAGE' },
+      { id: 'mel', title: 'MEL' },
+      { id: 'nv', title: 'NV' },
+      { id: 'bcc', title: 'BCC' },
+      { id: 'akiec', title: 'AKIEC' },
+      { id: 'bkl', title: 'BKL' },
+      { id: 'df', title: 'DF' },
+      { id: 'vasc', title: 'VASC' }
+    ]
+  })
+  const fileList = readFileList()
+
+  const partArr = new Array(MAX_THREAD)
+
+  fileList.forEach((file, i) => {
+    if (!partArr[i % MAX_THREAD]) {
+      partArr[i % MAX_THREAD] = [file]
+    } else {
+      partArr[i % MAX_THREAD].push(file)
+    }
+  })
+
+  Bar.start(fileList.length, 0)
+  partArr.forEach((part, i) => {
+    const child = cp.fork(path.join(__dirname, './child.js'))
+    child.send(part)
+    child.on('message', (msg) => {
+      if (msg.records) {
+        child.kill('SIGINT')
+      }
+      triggerMsg(i, msg, () => {
         Bar.stop()
-        csvWriter.writeRecords(records).then(() => {
+        let normalizeRecords = []
+        for (const rec of allRecords) {
+          normalizeRecords = normalizeRecords.concat(rec)
+        }
+        csvWriter.writeRecords(normalizeRecords).then(() => {
           console.log(`${recordFileName} 文件写入成功！`)
         }).catch(() => {
           console.log('csv 文件写入失败')
         })
-      }
-    }
-    preprocessFile()
-  }
+      })
+    })
+  })
 }
 
 run()
